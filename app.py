@@ -8,7 +8,7 @@ from pathlib import Path
 
 # ===== 設定 =====
 UPLOAD_FOLDER = "uploads"
-QUESTION_COUNT = 80
+QUESTION_COUNT = 20
 
 app = Flask(__name__)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -50,33 +50,29 @@ HTML_FOOT = "</div></body></html>"
 
 # ===== OCR =====
 def ocr_image(path):
-
     try:
-
         img = Image.open(path).convert("L")
-        img.thumbnail((500, 500))  # これだけでOK
-        img = ImageEnhance.Contrast(img).enhance(1.3)
+
+        # 🔴 かなり軽くする（重要）
+        img.thumbnail((400, 400))
+
+        # 軽めの補正
+        img = ImageEnhance.Contrast(img).enhance(1.2)
 
         config = "--oem 3 --psm 11"
         text = pytesseract.image_to_string(img, lang="eng", config=config)
 
-        text = text.replace("0","o").replace("1","l")
-
-        raw_words = re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)*", text)
+        raw_words = re.findall(r"[A-Za-z]+", text)
 
         found = set()
-
         for w in raw_words:
-
             key = w.lower()
-
             if key in WORDS:
                 found.add(key)
 
         return found
 
     except Exception as e:
-
         print("OCR失敗:", e)
         return set()
 
@@ -133,7 +129,7 @@ def index():
 
     if request.method == "POST":
 
-        files = request.files.getlist("images")[:2]
+        files = request.files.getlist("images")[:1]
         all_words = set()
 
         for file in files:
