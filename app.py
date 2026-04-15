@@ -54,7 +54,7 @@ def ocr_image(path):
     try:
 
         img = Image.open(path).convert("L")
-        img.thumbnail((1000, 1000))  # これだけでOK
+        img.thumbnail((500, 500))  # これだけでOK
         img = ImageEnhance.Contrast(img).enhance(1.3)
 
         config = "--oem 3 --psm 11"
@@ -83,6 +83,9 @@ def ocr_image(path):
 # ===== クイズ生成 =====
 def make_quiz_from_words(found_words):
 
+    if not found_words:
+        return[]
+        
     targets = list(found_words)
 
     if len(targets) > QUESTION_COUNT:
@@ -130,7 +133,7 @@ def index():
 
     if request.method == "POST":
 
-        files = request.files.getlist("images")[:3]
+        files = request.files.getlist("images")[:2]
         all_words = set()
 
         for file in files:
