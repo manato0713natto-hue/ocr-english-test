@@ -2,10 +2,11 @@ from flask import Flask, request
 import csv, random, re, os, json
 from PIL import Image, ImageEnhance
 import pytesseract
+import shutil
+pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
 from pathlib import Path
 
 # ===== 設定 =====
-pytesseract.pytesseract.tesseract_cmd = r"C:\Users\hp\Desktop\python\tesseract.exe"
 UPLOAD_FOLDER = "uploads"
 QUESTION_COUNT = 80
 
