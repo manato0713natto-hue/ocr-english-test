@@ -54,7 +54,7 @@ def ocr_image(path):
     try:
 
         img = Image.open(path).convert("L")
-        img = img.resize((img.width * 2, img.height * 2), Image.BICUBIC)
+        img.thumbnail((1000, 1000))  # これだけでOK
         img = ImageEnhance.Contrast(img).enhance(1.3)
 
         config = "--oem 3 --psm 11"
@@ -130,7 +130,7 @@ def index():
 
     if request.method == "POST":
 
-        files = request.files.getlist("images")
+        files = request.files.getlist("images")[:3]
         all_words = set()
 
         for file in files:
