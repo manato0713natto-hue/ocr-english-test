@@ -2,3 +2,6 @@ flask
 gunicorn
 pillow
 pytesseract
+easyocr
+torch
+torchvision
