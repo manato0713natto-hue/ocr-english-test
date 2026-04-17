@@ -1,19 +1,23 @@
 from flask import Flask, request
-import csv, random, re, os, json
+import csv, random, re, os, json, uuid
 from PIL import Image, ImageEnhance
 import pytesseract
 import shutil
-pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
 
 # ===== 設定 =====
 UPLOAD_FOLDER = "uploads"
 QUESTION_COUNT = 20
+MAX_FILES = 3
+MAX_TOTAL_SIZE = 2 * 1024 * 1024  # 2MB
 
 app = Flask(__name__)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ===== 単語帳読み込み（大文字保持）=====
+# ===== 単語帳読み込み =====
 WORDS = {}
 DISPLAY_WORDS = {}
 
@@ -21,7 +25,6 @@ with open("words.csv", encoding="utf-8") as f:
     for row in csv.DictReader(f):
         original = row["word"].strip()
         lower = original.lower()
-
         WORDS[lower] = row["meaning"].strip()
         DISPLAY_WORDS[lower] = original
 
@@ -38,12 +41,24 @@ HTML_HEAD = """
 <body class="bg-light">
 <div class="container py-4">
 <h3 class="text-center mb-3">📸 JPG画像 → 英単語テスト</h3>
+
 <div class="card p-3 shadow-sm mb-4">
-<form method="POST" enctype="multipart/form-data">
+<form method="POST" enctype="multipart/form-data" onsubmit="showLoading()">
 <input class="form-control mb-3" type="file" name="images" accept=".jpg,.jpeg" multiple required>
 <button class="btn btn-primary w-100">テスト作成</button>
 </form>
 </div>
+
+<div id="loading" style="display:none;" class="text-center mb-3">
+<div class="spinner-border text-primary"></div>
+<p>処理中...</p>
+</div>
+
+<script>
+function showLoading() {
+    document.getElementById("loading").style.display = "block";
+}
+</script>
 """
 
 HTML_FOOT = "</div></body></html>"
@@ -53,13 +68,18 @@ def ocr_image(path):
     try:
         img = Image.open(path).convert("L")
 
-        # 🔴 かなり軽くする（重要）
+        # 軽量化
         img.thumbnail((400, 400))
 
-        # 軽めの補正
+        # コントラスト調整
         img = ImageEnhance.Contrast(img).enhance(1.2)
 
-        config = "--oem 3 --psm 11"
+        # 2値化（高速＆精度UP）
+        img = img.point(lambda x: 0 if x < 140 else 255)
+
+        # OCR設定
+        config = "--oem 3 --psm 6"
+
         text = pytesseract.image_to_string(img, lang="eng", config=config)
 
         raw_words = re.findall(r"[A-Za-z]+", text)
@@ -80,8 +100,8 @@ def ocr_image(path):
 def make_quiz_from_words(found_words):
 
     if not found_words:
-        return[]
-        
+        return []
+
     targets = list(found_words)
 
     if len(targets) > QUESTION_COUNT:
@@ -98,7 +118,6 @@ def make_quiz_from_words(found_words):
         q_type = random.choice(["en_to_ja", "ja_to_en"])
 
         if q_type == "en_to_ja":
-
             question = f"【英→日】{display_word} の意味は？"
             correct = meaning
             wrongs = random.sample(
@@ -107,7 +126,6 @@ def make_quiz_from_words(found_words):
             choices = wrongs + [correct]
 
         else:
-
             question = f"【日→英】「{meaning}」に最も近い英単語は？"
             correct = display_word
             wrongs = random.sample(
@@ -116,7 +134,6 @@ def make_quiz_from_words(found_words):
             choices = wrongs + [correct]
 
         random.shuffle(choices)
-
         quizzes.append((question, correct, choices))
 
     return quizzes
@@ -129,22 +146,48 @@ def index():
 
     if request.method == "POST":
 
-        files = request.files.getlist("images")[:1]
-        all_words = set()
+        files = request.files.getlist("images")[:MAX_FILES]
 
-        for file in files:
+        # ===== サイズ制限 =====
+        total_size = 0
+        for f in files:
+            data = f.read()
+            total_size += len(data)
+            f.seek(0)
 
+        if total_size > MAX_TOTAL_SIZE:
+            return HTML_HEAD + "<p class='text-danger'>画像サイズが大きすぎます（2MB以内）</p>" + HTML_FOOT
+
+        # ===== 並列OCR =====
+        def process_file(file):
             if file.filename.lower().endswith((".jpg", ".jpeg")):
 
-                path = Path(UPLOAD_FOLDER) / file.filename
+                filename = f"{uuid.uuid4()}.jpg"
+                path = Path(UPLOAD_FOLDER) / filename
                 file.save(path)
 
-                all_words |= ocr_image(path)
+                words = ocr_image(path)
+
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+                return words
+
+            return set()
+
+        all_words = set()
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(process_file, files))
+
+        for r in results:
+            all_words |= r
 
         quizzes = make_quiz_from_words(all_words)
 
         if not quizzes:
-
             html += "<p class='text-danger'>単語が見つかりませんでした。</p>"
 
         else:
@@ -207,8 +250,6 @@ function checkAnswer(btn, correct) {
     html += HTML_FOOT
     return html
 
-
-import os
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
