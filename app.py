@@ -5,19 +5,24 @@ import pytesseract
 import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import difflib
+
+# ===== EasyOCR =====
+import easyocr
+reader = easyocr.Reader(['en'], gpu=False)
 
 pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
 
 # ===== 設定 =====
 UPLOAD_FOLDER = "uploads"
 QUESTION_COUNT = 20
-MAX_FILES = 3
-MAX_TOTAL_SIZE = 2 * 1024 * 1024  # 2MB
+MAX_FILES = 2   # ← EasyOCR使うので控えめ
+MAX_TOTAL_SIZE = 2 * 1024 * 1024
 
 app = Flask(__name__)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ===== 単語帳読み込み =====
+# ===== 単語帳 =====
 WORDS = {}
 DISPLAY_WORDS = {}
 
@@ -28,73 +33,69 @@ with open("words.csv", encoding="utf-8") as f:
         WORDS[lower] = row["meaning"].strip()
         DISPLAY_WORDS[lower] = original
 
-# ===== HTML =====
-HTML_HEAD = """
-<!doctype html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-<title>英単語OCRテスト</title>
-</head>
-<body class="bg-light">
-<div class="container py-4">
-<h3 class="text-center mb-3">📸 JPG画像 → 英単語テスト</h3>
+# ===== OCR補正 =====
+def correct_word(word):
+    candidates = list(WORDS.keys())
+    match = difflib.get_close_matches(word, candidates, n=1, cutoff=0.8)
+    return match[0] if match else None
 
-<div class="card p-3 shadow-sm mb-4">
-<form method="POST" enctype="multipart/form-data" onsubmit="showLoading()">
-<input class="form-control mb-3" type="file" name="images" accept=".jpg,.jpeg" multiple required>
-<button class="btn btn-primary w-100">テスト作成</button>
-</form>
-</div>
-
-<div id="loading" style="display:none;" class="text-center mb-3">
-<div class="spinner-border text-primary"></div>
-<p>処理中...</p>
-</div>
-
-<script>
-function showLoading() {
-    document.getElementById("loading").style.display = "block";
-}
-</script>
-"""
-
-HTML_FOOT = "</div></body></html>"
-
-# ===== OCR =====
-def ocr_image(path):
+# ===== Tesseract =====
+def ocr_tesseract(path):
     try:
         img = Image.open(path).convert("L")
+        img.thumbnail((600, 600))
+        img = ImageEnhance.Contrast(img).enhance(1.3)
 
-        # 軽量化
-        img.thumbnail((400, 400))
-
-        # コントラスト調整
-        img = ImageEnhance.Contrast(img).enhance(1.2)
-
-        # 2値化（高速＆精度UP）
-        img = img.point(lambda x: 0 if x < 140 else 255)
-
-        # OCR設定
         config = "--oem 3 --psm 6"
-
         text = pytesseract.image_to_string(img, lang="eng", config=config)
 
-        raw_words = re.findall(r"[A-Za-z]+", text)
+        words = re.findall(r"[A-Za-z]{3,}", text)
+
+        result = set()
+        for w in words:
+            key = w.lower()
+            if key in WORDS:
+                result.add(key)
+            else:
+                corrected = correct_word(key)
+                if corrected:
+                    result.add(corrected)
+
+        return result
+
+    except:
+        return set()
+
+# ===== EasyOCR（フォールバック）=====
+def ocr_easy(path):
+    try:
+        result = reader.readtext(path, detail=0)
+        words = re.findall(r"[A-Za-z]{3,}", " ".join(result))
 
         found = set()
-        for w in raw_words:
+        for w in words:
             key = w.lower()
             if key in WORDS:
                 found.add(key)
+            else:
+                corrected = correct_word(key)
+                if corrected:
+                    found.add(corrected)
 
         return found
 
-    except Exception as e:
-        print("OCR失敗:", e)
+    except:
         return set()
+
+# ===== ハイブリッドOCR =====
+def smart_ocr(path):
+    words = ocr_tesseract(path)
+
+    # 少なすぎたらEasyOCR
+    if len(words) < 3:
+        words = ocr_easy(path)
+
+    return words
 
 # ===== クイズ生成 =====
 def make_quiz_from_words(found_words):
@@ -138,6 +139,42 @@ def make_quiz_from_words(found_words):
 
     return quizzes
 
+# ===== HTML =====
+HTML_HEAD = """
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<title>英単語OCRテスト</title>
+</head>
+<body class="bg-light">
+<div class="container py-4">
+
+<h3 class="text-center mb-3">📸 OCR英単語テスト（高精度版）</h3>
+
+<div class="card p-3 mb-4">
+<form method="POST" enctype="multipart/form-data" onsubmit="showLoading()">
+<input class="form-control mb-3" type="file" name="images" accept=".jpg,.jpeg" multiple required>
+<button class="btn btn-primary w-100">テスト作成</button>
+</form>
+</div>
+
+<div id="loading" style="display:none;" class="text-center">
+<div class="spinner-border"></div>
+<p>高精度OCR処理中...</p>
+</div>
+
+<script>
+function showLoading(){
+    document.getElementById("loading").style.display="block";
+}
+</script>
+"""
+
+HTML_FOOT = "</div></body></html>"
+
 # ===== Flask =====
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -148,25 +185,23 @@ def index():
 
         files = request.files.getlist("images")[:MAX_FILES]
 
-        # ===== サイズ制限 =====
-        total_size = 0
+        # サイズ制限
+        total = 0
         for f in files:
             data = f.read()
-            total_size += len(data)
+            total += len(data)
             f.seek(0)
 
-        if total_size > MAX_TOTAL_SIZE:
-            return HTML_HEAD + "<p class='text-danger'>画像サイズが大きすぎます（2MB以内）</p>" + HTML_FOOT
+        if total > MAX_TOTAL_SIZE:
+            return html + "<p class='text-danger'>サイズ大きすぎ</p>" + HTML_FOOT
 
-        # ===== 並列OCR =====
-        def process_file(file):
+        def process(file):
             if file.filename.lower().endswith((".jpg", ".jpeg")):
 
-                filename = f"{uuid.uuid4()}.jpg"
-                path = Path(UPLOAD_FOLDER) / filename
+                path = Path(UPLOAD_FOLDER) / f"{uuid.uuid4()}.jpg"
                 file.save(path)
 
-                words = ocr_image(path)
+                words = smart_ocr(path)
 
                 try:
                     os.remove(path)
@@ -179,8 +214,8 @@ def index():
 
         all_words = set()
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            results = list(executor.map(process_file, files))
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            results = list(ex.map(process, files))
 
         for r in results:
             all_words |= r
@@ -188,64 +223,38 @@ def index():
         quizzes = make_quiz_from_words(all_words)
 
         if not quizzes:
-            html += "<p class='text-danger'>単語が見つかりませんでした。</p>"
+            html += "<p class='text-danger'>単語検出失敗</p>"
 
         else:
 
-            html += f"<p class='fw-bold'>作成問題数：{len(quizzes)} 問</p>"
+            html += f"<p>問題数：{len(quizzes)}</p>"
 
-            html += """
-<script>
-let score = 0;
-let answered = 0;
-
-function checkAnswer(btn, correct) {
-
-    const buttons = btn.parentElement.querySelectorAll("button");
-    buttons.forEach(b => b.disabled = true);
-
-    answered++;
-
-    if (btn.textContent.trim() === correct.trim()) {
-
-        btn.classList.remove("btn-outline-primary");
-        btn.classList.add("btn-success");
-        score++;
-
-    } else {
-
-        btn.classList.remove("btn-outline-primary");
-        btn.classList.add("btn-danger");
-        alert("正解は「" + correct + "」");
-
-    }
-
-    document.getElementById("score").innerText = score;
-    document.getElementById("rate").innerText =
-        Math.round(score / answered * 100);
-}
-</script>
-
-<div class="mb-3">
-スコア：<b><span id="score">0</span></b>
-正答率：<b><span id="rate">0</span>%</b>
-</div>
-"""
+            html += "<div id='score'>0</div>"
 
             for i, (q, correct, choices) in enumerate(quizzes, 1):
 
-                html += f"""
-<div class="card mb-3 p-3 shadow-sm">
-<p class="fw-bold">Q{i}. {q}</p>
-<div class="d-grid gap-2">
-"""
+                html += f"<p>{i}. {q}</p>"
 
-                safe_correct = json.dumps(correct)
+                safe = json.dumps(correct)
 
                 for c in choices:
-                    html += f'<button class="btn btn-outline-primary" onclick=\'checkAnswer(this, {safe_correct})\'>{c}</button>'
+                    html += f"<button onclick='check(this,{safe})'>{c}</button><br>"
 
-                html += "</div></div>"
+        html += """
+<script>
+let score=0;
+function check(btn,correct){
+    if(btn.innerText.trim()==correct.trim()){
+        btn.style.background="green";
+        score++;
+    }else{
+        btn.style.background="red";
+        alert("正解:"+correct);
+    }
+    document.getElementById("score").innerText=score;
+}
+</script>
+"""
 
     html += HTML_FOOT
     return html
